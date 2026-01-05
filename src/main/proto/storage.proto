@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package com.sistem.proje.grpc;
+
+option java_multiple_files = true;
+option java_package = "com.sistem.proje.grpc";
+option java_outer_classname = "StorageProto";
+
+// Mesaj saklama için kullanılan mesaj
+message StoredMessage {
+  int32 id = 1;
+  string text = 2;
+}
+
+// Mesaj ID'si için kullanılan mesaj
+message MessageId {
+  int32 id = 1;
+}
+
+// Saklama sonucu için kullanılan mesaj
+message StoreResult {
+  bool success = 1;
+}
+
+// Storage servisi
+service StorageService {
+  // Mesajı saklar
+  rpc Store(StoredMessage) returns (StoreResult);
+  
+  // Mesajı getirir
+  rpc Retrieve(MessageId) returns (StoredMessage);
+}
+
