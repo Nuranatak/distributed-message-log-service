@@ -6,7 +6,11 @@ import com.sistem.proje.storage.MessageStorage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.PrintWriter;
+import java.net.Socket;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -161,42 +165,28 @@ public class MemberNode {
      * Main metodu - Member Node'u başlatır
      */
     public static void main(String[] args) {
+        // Port belirleme: 1) System property, 2) Varsayılan
         int port = DEFAULT_GRPC_PORT;
+        String portProperty = System.getProperty("member.port");
+        if (portProperty != null && !portProperty.isEmpty()) {
+            try {
+                port = Integer.parseInt(portProperty);
+                logger.info("Port system property'den okundu: {}", port);
+            } catch (NumberFormatException e) {
+                logger.error("Geçersiz member.port değeri: {}. Varsayılan port kullanılıyor: {}", 
+                        portProperty, DEFAULT_GRPC_PORT);
+            }
+        }
+
         IOMode ioMode = IOMode.BUFFERED;
         long statsInterval = DEFAULT_STATS_INTERVAL_SECONDS;
 
-        // Port argümanı
-        if (args.length > 0) {
-            try {
-                port = Integer.parseInt(args[0]);
-            } catch (NumberFormatException e) {
-                logger.error("Geçersiz port numarası: {}. Varsayılan port kullanılıyor: {}", 
-                        args[0], DEFAULT_GRPC_PORT);
-            }
-        }
-
-        // IO modu argümanı
-        if (args.length > 1) {
-            try {
-                ioMode = IOMode.valueOf(args[1].toUpperCase());
-            } catch (IllegalArgumentException e) {
-                logger.error("Geçersiz IO modu: {}. Varsayılan BUFFERED kullanılıyor", args[1]);
-            }
-        }
-
-        // İstatistik aralığı argümanı
-        if (args.length > 2) {
-            try {
-                statsInterval = Long.parseLong(args[2]);
-            } catch (NumberFormatException e) {
-                logger.error("Geçersiz istatistik aralığı: {}. Varsayılan {} saniye kullanılıyor", 
-                        args[2], DEFAULT_STATS_INTERVAL_SECONDS);
-            }
-        }
+        logger.info("=== MemberNode başlatılıyor === Port: {}", port);
 
         MemberNode member = new MemberNode(port, ioMode, statsInterval);
         
         // Shutdown hook ekle
+        final int finalPort = port;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             logger.info("Shutdown sinyali alındı...");
             member.stop();
@@ -204,12 +194,39 @@ public class MemberNode {
 
         member.start();
         
+        // LeaderNode'a register ol
+        registerToLeader("localhost", 8080, "member-" + finalPort, "localhost", finalPort);
+        
         // Server'ın çalışmasını bekle
         try {
             member.storageServer.blockUntilShutdown();
         } catch (InterruptedException e) {
             logger.error("Member Node beklenirken kesinti: ", e);
             Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * LeaderNode'a TCP üzerinden REGISTER mesajı gönderir
+     */
+    private static void registerToLeader(String leaderHost, int leaderPort, String memberId, String memberHost, int memberPort) {
+        try (Socket socket = new Socket(leaderHost, leaderPort);
+             PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
+             BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
+            
+            String registerCmd = String.format("REGISTER %s %s %d", memberId, memberHost, memberPort);
+            writer.println(registerCmd);
+            
+            String response = reader.readLine();
+            if ("REGISTERED".equals(response)) {
+                logger.info("Registered to leader as {}:{}", memberHost, memberPort);
+                System.out.println(String.format("Registered to leader as %s:%d", memberHost, memberPort));
+            } else {
+                logger.warn("Leader registration failed: {}", response);
+            }
+        } catch (IOException e) {
+            logger.error("Leader'a bağlanılamadı ({}:{}): {}", leaderHost, leaderPort, e.getMessage());
+            System.err.println("UYARI: Leader'a bağlanılamadı. Leader çalışıyor mu?");
         }
     }
 }

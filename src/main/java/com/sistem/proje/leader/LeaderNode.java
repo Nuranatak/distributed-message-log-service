@@ -1014,6 +1014,13 @@ public class LeaderNode {
                             clientSocket.getRemoteSocketAddress(), line);
                     
                     try {
+                        // REGISTER komutu için özel işleme (MemberNode'dan)
+                        if (line.startsWith("REGISTER ")) {
+                            String result = handleRegisterCommand(line);
+                            writer.println(result);
+                            continue;
+                        }
+                        
                         // Komutu parse et
                         Command command = commandParser.parse(line);
                         
@@ -1146,7 +1153,9 @@ public class LeaderNode {
         LeaderNode leader = new LeaderNode(port, IOMode.BUFFERED);
         
         // Üyeleri kaydet (bootstrap)
-        registerDefaultMembers(leader);
+        // Varsayılan üyeler artık dinamik register ile ekleniyor
+        // registerDefaultMembers(leader); // KALDIRILDI - MemberNode'lar kendileri register olacak
+        logger.info("Leader başlatıldı. Member'lar dinamik olarak register olacak.");
         
         // Shutdown hook ekle
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -1158,17 +1167,27 @@ public class LeaderNode {
     }
 
     /**
-     * Varsayılan üyeleri kaydeder (bootstrap)
-     * Üye bilgileri: member1 (localhost:9091), member2 (localhost:9092), member3 (localhost:9093)
+     * REGISTER komutunu işler - MemberNode'lar dinamik olarak kaydolur
+     * Format: REGISTER <memberId> <host> <port>
      */
-    private static void registerDefaultMembers(LeaderNode leader) {
-        // Varsayılan üye listesi
-        // Gerçek kullanımda bu bilgiler config dosyasından veya argümanlardan okunabilir
-        leader.addMember("member1", "localhost", 9091);
-        leader.addMember("member2", "localhost", 9092);
-        leader.addMember("member3", "localhost", 9093);
-        
-        logger.info("Varsayılan üyeler kaydedildi: 3 üye");
+    private String handleRegisterCommand(String line) {
+        try {
+            String[] parts = line.split(" ");
+            if (parts.length < 4) {
+                return "ERROR: Invalid REGISTER format. Use: REGISTER <id> <host> <port>";
+            }
+            String memberId = parts[1];
+            String host = parts[2];
+            int port = Integer.parseInt(parts[3]);
+            
+            addMember(memberId, host, port);
+            logger.info("Member registered dynamically: {} ({}:{})", memberId, host, port);
+            System.out.println(String.format("Member registered dynamically: %s (%s:%d)", memberId, host, port));
+            return "REGISTERED";
+        } catch (Exception e) {
+            logger.error("REGISTER hatası: {}", e.getMessage());
+            return "ERROR: " + e.getMessage();
+        }
     }
 }
 
