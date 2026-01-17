@@ -18,7 +18,7 @@ public class MessageStorage {
     private static final Logger logger = LoggerFactory.getLogger(MessageStorage.class);
     private static final String MESSAGES_DIR = "messages";
     private static final String FILE_EXTENSION = ".msg";
-    private static final IOMode DEFAULT_IO_MODE = IOMode.BUFFERED;
+    private static final IOMode DEFAULT_IO_MODE = IOMode.UNBUFFERED;
     
     private final Path messagesDirectory;
     private final IOMode ioMode;

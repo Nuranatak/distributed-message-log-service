@@ -21,7 +21,7 @@ public class StorageServiceImpl extends StorageServiceGrpc.StorageServiceImplBas
      * Varsayılan Buffered IO modu ile oluşturur
      */
     public StorageServiceImpl() {
-        this(IOMode.BUFFERED);
+        this(IOMode.UNBUFFERED);
     }
 
     /**

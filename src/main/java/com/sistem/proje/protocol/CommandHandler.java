@@ -25,7 +25,7 @@ public class CommandHandler {
      * Varsayılan Buffered IO modu ile oluşturur
      */
     public CommandHandler() {
-        this(IOMode.BUFFERED);
+        this(IOMode.UNBUFFERED);
     }
 
     /**

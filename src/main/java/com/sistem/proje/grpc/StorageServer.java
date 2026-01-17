@@ -26,7 +26,7 @@ public class StorageServer {
      * Varsayılan port ve Buffered IO ile oluşturur
      */
     public StorageServer() {
-        this(DEFAULT_PORT, IOMode.BUFFERED);
+        this(DEFAULT_PORT, IOMode.UNBUFFERED);
     }
 
     /**
@@ -108,7 +108,7 @@ public class StorageServer {
      */
     public static void main(String[] args) {
         int port = DEFAULT_PORT;
-        IOMode ioMode = IOMode.BUFFERED;
+        IOMode ioMode = IOMode.UNBUFFERED;
 
         // Port argümanı
         if (args.length > 0) {

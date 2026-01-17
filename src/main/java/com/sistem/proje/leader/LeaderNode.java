@@ -41,7 +41,7 @@ import java.util.concurrent.TimeUnit;
  */
 public class LeaderNode {
     private static final Logger logger = LoggerFactory.getLogger(LeaderNode.class);
-    private static final int DEFAULT_PORT = 8080;
+    private static final int DEFAULT_PORT = 6666;
     
     private final int port;
     private ServerSocket serverSocket;
@@ -76,12 +76,17 @@ public class LeaderNode {
     // Periyodik istatistik için scheduler
     private final ScheduledExecutorService statsScheduler;
     private static final long DEFAULT_STATS_INTERVAL_SECONDS = 10;
+    
+    // Heartbeat kontrolü için scheduler
+    private final ScheduledExecutorService heartbeatScheduler;
+    private static final long HEARTBEAT_CHECK_INTERVAL_SECONDS = 5; // Her 5 saniyede bir kontrol
+    private static final long HEARTBEAT_TIMEOUT_MS = 8000; // 8 saniye (member 3 saniyede bir gönderiyor, 8 saniye threshold)
 
     /**
      * Varsayılan port, Buffered IO ve Hash-based load balancing ile oluşturur
      */
     public LeaderNode() {
-        this(DEFAULT_PORT, IOMode.BUFFERED, LoadBalancingStrategy.HASH_BASED);
+        this(DEFAULT_PORT, IOMode.UNBUFFERED, LoadBalancingStrategy.ROUND_ROBIN);
     }
 
     /**
@@ -91,7 +96,7 @@ public class LeaderNode {
      * @param ioMode IO modu (BUFFERED veya UNBUFFERED)
      */
     public LeaderNode(int port, IOMode ioMode) {
-        this(port, ioMode, LoadBalancingStrategy.HASH_BASED);
+        this(port, ioMode, LoadBalancingStrategy.ROUND_ROBIN);
     }
 
     /**
@@ -115,6 +120,7 @@ public class LeaderNode {
         // roundRobinCounter zaten field'da initialize edilmiş (final)
         this.tolerance = 0;
         this.statsScheduler = Executors.newScheduledThreadPool(1);
+        this.heartbeatScheduler = Executors.newScheduledThreadPool(1);
         
         // Tolerance değerini yükle
         try {
@@ -143,12 +149,16 @@ public class LeaderNode {
             // Periyodik istatistikleri başlat
             startPeriodicStats();
 
+            // Heartbeat kontrolünü başlat
+            startHeartbeatCheck();
+
             // Aktif üye listesini logla
             logRegisteredMembers();
 
             while (running) {
                 Socket clientSocket = serverSocket.accept();
-                logger.info("Yeni client bağlandı: {}", clientSocket.getRemoteSocketAddress());
+                // DEBUG seviyesine alındı - heartbeat bağlantıları log spam yaratmasın
+                logger.debug("Yeni bağlantı: {}", clientSocket.getRemoteSocketAddress());
                 
                 // Her client için ayrı thread'de işle
                 clientThreadPool.submit(new ClientHandler(clientSocket));
@@ -190,8 +200,12 @@ public class LeaderNode {
             }
             clientThreadPool.shutdown();
             statsScheduler.shutdown();
+            heartbeatScheduler.shutdown();
             if (!statsScheduler.awaitTermination(5, TimeUnit.SECONDS)) {
                 statsScheduler.shutdownNow();
+            }
+            if (!heartbeatScheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                heartbeatScheduler.shutdownNow();
             }
             logger.info("Leader Node durduruldu.");
         } catch (IOException e) {
@@ -216,6 +230,8 @@ public class LeaderNode {
         deadMembers.removeIf(m -> m.getId().equals(memberId));
         // Aktif üyeler listesine ekle
         activeMembers.add(member);
+        // Heartbeat timestamp'ini güncelle (yeni kayıt olduğu için)
+        member.setLastHeartbeatTimestamp(System.currentTimeMillis());
         logger.info("Member registered: {} ({}:{})", memberId, host, port);
         System.out.println(String.format("Member registered: %s (%s:%d)", memberId, host, port));
     }
@@ -417,6 +433,56 @@ public class LeaderNode {
             );
             System.err.println(errorMsg);
             logger.error("İstatistik yazdırılırken beklenmeyen hata: ", e);
+        }
+    }
+
+    /**
+     * Heartbeat kontrolünü başlatır
+     */
+    private void startHeartbeatCheck() {
+        heartbeatScheduler.scheduleAtFixedRate(
+            this::checkHeartbeats,
+            0, // İlk çalıştırma gecikmesi (0 = hemen)
+            HEARTBEAT_CHECK_INTERVAL_SECONDS,
+            TimeUnit.SECONDS
+        );
+        logger.info("Heartbeat kontrolü başlatıldı. Aralık: {} saniye, Timeout: {} ms", 
+                HEARTBEAT_CHECK_INTERVAL_SECONDS, HEARTBEAT_TIMEOUT_MS);
+    }
+
+    /**
+     * Tüm aktif üyelerin heartbeat'lerini kontrol eder
+     * Timeout aşılan üyeleri DEAD olarak işaretler
+     */
+    private void checkHeartbeats() {
+        if (!running) {
+            return;
+        }
+
+        long currentTime = System.currentTimeMillis();
+        List<MemberInfo> membersToMarkDead = new ArrayList<>();
+
+        // Tüm aktif üyeleri kontrol et
+        for (MemberInfo member : activeMembers) {
+            long timeSinceLastHeartbeat = currentTime - member.getLastHeartbeatTimestamp();
+            
+            if (timeSinceLastHeartbeat > HEARTBEAT_TIMEOUT_MS) {
+                // Timeout aşıldı, üyeyi DEAD olarak işaretle
+                membersToMarkDead.add(member);
+            }
+        }
+
+        // Timeout aşılan üyeleri DEAD olarak işaretle
+        for (MemberInfo member : membersToMarkDead) {
+            long timeSinceLastHeartbeat = currentTime - member.getLastHeartbeatTimestamp();
+            String logMessage = String.format(
+                "[MEMBER DEAD] %s (no heartbeat for %d ms)",
+                member.getId(),
+                timeSinceLastHeartbeat
+            );
+            logger.warn(logMessage);
+            System.out.println(logMessage);
+            markMemberAsDead(member.getId(), "Heartbeat timeout");
         }
     }
 
@@ -1021,14 +1087,25 @@ public class LeaderNode {
                             continue;
                         }
                         
+                        // HEARTBEAT komutu için özel işleme (MemberNode'dan)
+                        if (line.startsWith("HEARTBEAT ")) {
+                            String result = handleHeartbeatCommand(line);
+                            writer.println(result);
+                            continue;
+                        }
+                        
                         // Komutu parse et
                         Command command = commandParser.parse(line);
                         
                         // SET ve GET komutları özel işleme
                         String result;
                         if (command.getType() == com.sistem.proje.protocol.CommandType.SET) {
+                            // Gerçek client komutu geldi, logla
+                            logger.info("Client komutu (SET): {}", clientSocket.getRemoteSocketAddress());
                             result = handleSetCommand((SetCommand) command);
                         } else if (command.getType() == com.sistem.proje.protocol.CommandType.GET) {
+                            // Gerçek client komutu geldi, logla
+                            logger.info("Client komutu (GET): {}", clientSocket.getRemoteSocketAddress());
                             result = handleGetCommand((GetCommand) command);
                         } else {
                             // Diğer komutlar normal işleme
@@ -1079,12 +1156,14 @@ public class LeaderNode {
         private final String host;
         private final int port;
         private volatile MemberStatus status;
+        private volatile long lastHeartbeatTimestamp;
 
         public MemberInfo(String id, String host, int port) {
             this.id = id;
             this.host = host;
             this.port = port;
             this.status = MemberStatus.ALIVE;
+            this.lastHeartbeatTimestamp = System.currentTimeMillis();
         }
 
         public String getId() {
@@ -1115,10 +1194,18 @@ public class LeaderNode {
             return status == MemberStatus.DEAD;
         }
 
+        public long getLastHeartbeatTimestamp() {
+            return lastHeartbeatTimestamp;
+        }
+
+        public void setLastHeartbeatTimestamp(long timestamp) {
+            this.lastHeartbeatTimestamp = timestamp;
+        }
+
         @Override
         public String toString() {
-            return String.format("MemberInfo{id='%s', host='%s', port=%d, status=%s}", 
-                    id, host, port, status);
+            return String.format("MemberInfo{id='%s', host='%s', port=%d, status=%s, lastHeartbeat=%d}", 
+                    id, host, port, status, lastHeartbeatTimestamp);
         }
 
         @Override
@@ -1150,7 +1237,7 @@ public class LeaderNode {
             }
         }
 
-        LeaderNode leader = new LeaderNode(port, IOMode.BUFFERED);
+        LeaderNode leader = new LeaderNode(port, IOMode.UNBUFFERED);
         
         // Üyeleri kaydet (bootstrap)
         // Varsayılan üyeler artık dinamik register ile ekleniyor
@@ -1186,6 +1273,42 @@ public class LeaderNode {
             return "REGISTERED";
         } catch (Exception e) {
             logger.error("REGISTER hatası: {}", e.getMessage());
+            return "ERROR: " + e.getMessage();
+        }
+    }
+
+    /**
+     * HEARTBEAT komutunu işler - MemberNode'lar periyodik olarak heartbeat gönderir
+     * Format: HEARTBEAT <memberId>
+     */
+    private String handleHeartbeatCommand(String line) {
+        try {
+            String[] parts = line.split(" ");
+            if (parts.length < 2) {
+                return "ERROR: Invalid HEARTBEAT format. Use: HEARTBEAT <memberId>";
+            }
+            String memberId = parts[1];
+            
+            // Üyeyi bul ve heartbeat timestamp'ini güncelle
+            MemberInfo member = findMemberById(memberId);
+            if (member != null) {
+                long currentTime = System.currentTimeMillis();
+                member.setLastHeartbeatTimestamp(currentTime);
+                
+                // Eğer üye DEAD durumundaysa, ALIVE olarak işaretle (recovery)
+                if (member.isDead()) {
+                    markMemberAsAlive(memberId);
+                    logger.info("Member {} recovered from DEAD state (heartbeat received)", memberId);
+                }
+                
+                logger.debug("Heartbeat received from member: {} (timestamp: {})", memberId, currentTime);
+                return "HEARTBEAT_OK";
+            } else {
+                logger.warn("Heartbeat received from unknown member: {}", memberId);
+                return "ERROR: Member not registered";
+            }
+        } catch (Exception e) {
+            logger.error("HEARTBEAT hatası: {}", e.getMessage());
             return "ERROR: " + e.getMessage();
         }
     }

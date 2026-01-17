@@ -30,12 +30,18 @@ public class MemberNode {
     private final ScheduledExecutorService scheduler;
     private final long statsIntervalSeconds;
     private volatile boolean running = false;
+    
+    // Heartbeat için
+    private final String memberId;
+    private final String leaderHost;
+    private final int leaderPort;
+    private static final long HEARTBEAT_INTERVAL_SECONDS = 3; // Her 3 saniyede bir heartbeat gönder
 
     /**
      * Varsayılan ayarlarla oluşturur
      */
     public MemberNode() {
-        this(DEFAULT_GRPC_PORT, IOMode.BUFFERED, DEFAULT_STATS_INTERVAL_SECONDS);
+        this(DEFAULT_GRPC_PORT, IOMode.UNBUFFERED, DEFAULT_STATS_INTERVAL_SECONDS);
     }
 
     /**
@@ -56,11 +62,28 @@ public class MemberNode {
      * @param statsIntervalSeconds İstatistik yazdırma aralığı (saniye)
      */
     public MemberNode(int grpcPort, IOMode ioMode, long statsIntervalSeconds) {
+        this(grpcPort, ioMode, statsIntervalSeconds, "localhost", 6666, "member-" + grpcPort);
+    }
+
+    /**
+     * Belirtilen port, IO modu, istatistik aralığı ve leader bilgileri ile oluşturur
+     * 
+     * @param grpcPort gRPC server port'u
+     * @param ioMode IO modu (BUFFERED veya UNBUFFERED)
+     * @param statsIntervalSeconds İstatistik yazdırma aralığı (saniye)
+     * @param leaderHost Leader host adresi
+     * @param leaderPort Leader port'u
+     * @param memberId Member ID'si
+     */
+    public MemberNode(int grpcPort, IOMode ioMode, long statsIntervalSeconds, String leaderHost, int leaderPort, String memberId) {
         this.grpcPort = grpcPort;
         this.messageStorage = new MessageStorage(ioMode);
         this.storageServer = new StorageServer(grpcPort, ioMode);
         this.scheduler = Executors.newScheduledThreadPool(1);
         this.statsIntervalSeconds = statsIntervalSeconds > 0 ? statsIntervalSeconds : DEFAULT_STATS_INTERVAL_SECONDS;
+        this.leaderHost = leaderHost;
+        this.leaderPort = leaderPort;
+        this.memberId = memberId;
     }
 
     /**
@@ -74,6 +97,9 @@ public class MemberNode {
             
             // Periyodik istatistik yazdırmayı başlat
             startPeriodicStats();
+            
+            // Heartbeat göndermeyi başlat
+            startHeartbeat();
             
         } catch (IOException e) {
             logger.error("Member Node başlatılamadı: ", e);
@@ -110,6 +136,46 @@ public class MemberNode {
             TimeUnit.SECONDS
         );
         logger.info("Periyodik istatistik yazdırma başlatıldı. Aralık: {} saniye", statsIntervalSeconds);
+    }
+
+    /**
+     * Heartbeat göndermeyi başlatır
+     */
+    private void startHeartbeat() {
+        scheduler.scheduleAtFixedRate(
+            this::sendHeartbeat,
+            HEARTBEAT_INTERVAL_SECONDS, // İlk heartbeat'i hemen gönderme, biraz bekle
+            HEARTBEAT_INTERVAL_SECONDS,
+            TimeUnit.SECONDS
+        );
+        logger.info("Heartbeat gönderme başlatıldı. Aralık: {} saniye", HEARTBEAT_INTERVAL_SECONDS);
+    }
+
+    /**
+     * Leader'a heartbeat mesajı gönderir
+     */
+    private void sendHeartbeat() {
+        if (!running) {
+            return;
+        }
+
+        try (Socket socket = new Socket(leaderHost, leaderPort);
+             PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
+             BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
+            
+            String heartbeatCmd = String.format("HEARTBEAT %s", memberId);
+            writer.println(heartbeatCmd);
+            
+            String response = reader.readLine();
+            if ("HEARTBEAT_OK".equals(response)) {
+                logger.debug("Heartbeat sent successfully to leader: {}", memberId);
+            } else {
+                logger.warn("Heartbeat response unexpected: {}", response);
+            }
+        } catch (IOException e) {
+            logger.debug("Heartbeat gönderilemedi ({}:{}): {}", leaderHost, leaderPort, e.getMessage());
+            // Hata durumunda sessizce devam et, bir sonraki heartbeat'te tekrar dener
+        }
     }
 
     /**
@@ -178,12 +244,18 @@ public class MemberNode {
             }
         }
 
-        IOMode ioMode = IOMode.BUFFERED;
+        IOMode ioMode = IOMode.UNBUFFERED;
         long statsInterval = DEFAULT_STATS_INTERVAL_SECONDS;
+        
+        // Leader bilgileri
+        String leaderHost = "localhost";
+        int leaderPort = 6666;
+        String memberId = "member-" + port;
 
         logger.info("=== MemberNode başlatılıyor === Port: {}", port);
 
-        MemberNode member = new MemberNode(port, ioMode, statsInterval);
+        // MemberNode'u leader bilgileri ile oluştur
+        MemberNode member = new MemberNode(port, ioMode, statsInterval, leaderHost, leaderPort, memberId);
         
         // Shutdown hook ekle
         final int finalPort = port;
@@ -195,7 +267,7 @@ public class MemberNode {
         member.start();
         
         // LeaderNode'a register ol
-        registerToLeader("localhost", 8080, "member-" + finalPort, "localhost", finalPort);
+        registerToLeader(leaderHost, leaderPort, memberId, "localhost", finalPort);
         
         // Server'ın çalışmasını bekle
         try {
